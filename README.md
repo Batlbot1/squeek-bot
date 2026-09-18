@@ -13,7 +13,7 @@ const { SqueekBot } = require('squeek-bot');
 const bot = new SqueekBot(process.env.BOT_TOKEN);
 
 bot.on('message', async (msg) => {
-  if (msg.text === '/hi') await msg.reply('Привіт! 🐀');
+  if (msg.text === '/hi') await msg.reply('Hi there! 🐀');
 });
 
 bot.start();
@@ -21,7 +21,7 @@ bot.start();
 
 ## Getting a token
 
-In the Squeek app: Профіль → Мої боти → Створити. The app makes the bot's
+In the Squeek app: Profile → My bots → Create. The app makes the bot's
 keys on your phone and shows the token **once** — copy it into your program.
 The token is `<id>:<secret key>:<login secret>`. Keep it like a password:
 whoever has it is the bot.
@@ -71,7 +71,7 @@ ACCESS=$(echo "$TOKENS" | jq -r .accessToken)
 
 curl https://api.squeek.net/messages -H "authorization: Bearer $ACCESS" \
   -H 'content-type: application/json' \
-  -d '{"chatId":17,"content":"Нагадування: зустріч о 19:00"}'
+  -d '{"chatId":17,"content":"Reminder: meeting at 19:00"}'
 ```
 
 Private chats and groups are end-to-end encrypted and need the envelope this

@@ -13,13 +13,13 @@ const keypair = () => {
 test('a message sealed to two members opens for each with their own key', () => {
   const alice = keypair();
   const bot = keypair();
-  const envelope = encryptMessage('Привіт 🐀', [
+  const envelope = encryptMessage('Hello 🐀', [
     { userId: 1, publicKey: alice.publicKey },
     { userId: 42, publicKey: bot.publicKey },
   ]);
 
-  assert.equal(decryptMessage(envelope.content, envelope.encryptedSymmetricKeys['1'], alice.secretKey), 'Привіт 🐀');
-  assert.equal(decryptMessage(envelope.content, envelope.encryptedSymmetricKeys['42'], bot.secretKey), 'Привіт 🐀');
+  assert.equal(decryptMessage(envelope.content, envelope.encryptedSymmetricKeys['1'], alice.secretKey), 'Hello 🐀');
+  assert.equal(decryptMessage(envelope.content, envelope.encryptedSymmetricKeys['42'], bot.secretKey), 'Hello 🐀');
   assert.throws(() => decryptMessage(envelope.content, envelope.encryptedSymmetricKeys['1'], bot.secretKey));
 });
 
