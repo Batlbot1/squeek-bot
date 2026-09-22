@@ -45,9 +45,10 @@ bot.start()                       // sign in, connect; resolves when connected
 bot.stop()
 
 bot.on('message', (msg) => …)     // every message in every chat the bot is in
+bot.on('button', (press) => …)    // someone pressed a button of the bot's
 bot.on('connected' | 'disconnected' | 'error', …)
 
-bot.send(chatId, text, { replyTo? })   // resolves with the new message id
+bot.send(chatId, text, { replyTo?, buttons? })   // resolves with the new message id
 bot.sendFile(chatId, { name, data, mimeType }, caption?)   // any chat
 bot.editMessage(chatId, messageId, text)   // rewrite one of its own
 bot.deleteMessage(messageId)               // for everyone
@@ -57,6 +58,9 @@ bot.setDescription(text)                     // the line under its name
 bot.setWebhook(url)                          // deliver to a URL instead of this socket
 bot.dropWebhook()                            // back to the socket
 bot.readWebhook(rawBody, signature, secret)  // one delivery, verified and opened
+bot.schedule(chatId, text, when)             // publish later; channels only
+bot.scheduled(chatId?)                       // what has not gone out yet
+bot.unschedule(id)
 bot.mute(chatId, userId, minutes, reason?)   // as an admin or moderator
 bot.ban(chatId, userId, reason?)
 bot.unrestrict(chatId, userId)
@@ -176,6 +180,42 @@ await bot.sendFile(chatId, { name: 'cpu.png', data: chart, mimeType: 'image/png'
 
 The whole file is held in memory while it is sealed — fine for a chart or a
 log, not for a film.
+
+## Buttons
+
+Hang up to five buttons under a message. The label is what people read; the
+data is what comes back to the bot, and nobody else ever sees the press:
+
+```js
+await bot.send(chatId, 'Restart the server?', {
+  buttons: [
+    { label: 'Yes', data: 'restart:yes' },
+    { label: 'Not now', data: 'restart:no' },
+  ],
+});
+
+bot.on('button', async (press) => {
+  if (press.data !== 'restart:yes') return;
+
+  await bot.send(press.chatId, `${press.from.name} said yes; restarting…`);
+  await restart();
+});
+```
+
+The server checks the data against the buttons the message actually carries,
+so what arrives is always something the bot wrote itself.
+
+## Publishing later
+
+```js
+const id = await bot.schedule(chatId, 'Доброго ранку 🐀', new Date('2026-10-01T06:00:00Z'));
+
+await bot.scheduled(chatId);   // what is still waiting
+await bot.unschedule(id);      // take it back
+```
+
+Channels and discussions only: those the server can encrypt, so nothing waits
+on a device that is asleep. The queue is looked at every minute.
 
 ## Keeping order
 

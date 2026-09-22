@@ -39,6 +39,20 @@ export type Chat = { id: number; type: string; name: string | null };
 /** One entry of the menu people see when they type "/" in a chat with the bot. */
 export type BotCommand = { command: string; description: string };
 
+/**
+ * A button under a message. `label` is what people read, `data` is what
+ * comes back to the bot when they press — it never leaves the bot's world.
+ */
+export type BotButton = { label: string; data: string };
+
+/** Someone pressed one of the bot's buttons. */
+export type ButtonPress = {
+  chatId: number;
+  messageId: number;
+  data: string;
+  from: { id: number; username: string; name: string };
+};
+
 /** One message, decrypted, as the bot sees it. */
 export class Message {
   constructor(
@@ -146,11 +160,20 @@ export class SqueekBot extends EventEmitter {
    * to every member; a channel or discussion goes as it is, the server seals
    * those. Bots may post thirty messages a minute.
    */
-  async send(chatId: number, text: string, options: { replyTo?: number } = {}): Promise<number> {
+  async send(
+    chatId: number,
+    text: string,
+    options: { replyTo?: number; buttons?: BotButton[] } = {},
+  ): Promise<number> {
     const chat = await this.chatOf(chatId);
 
     if (isServerEncrypted(chat.type)) {
-      const stored = await this.api.postToChannel(chatId, text, options.replyTo);
+      const stored = await this.api.postToChannel(
+        chatId,
+        text,
+        options.replyTo,
+        options.buttons,
+      );
       return Number(stored.id);
     }
 
@@ -169,6 +192,7 @@ export class SqueekBot extends EventEmitter {
         content: envelope.content,
         encryptedSymmetricKeys: envelope.encryptedSymmetricKeys,
         replyToMessageId: options.replyTo,
+        buttons: options.buttons,
       });
     } catch (error) {
       // The member list has moved under us: fetch it again and retry once.
@@ -183,6 +207,7 @@ export class SqueekBot extends EventEmitter {
         content: fresh.content,
         encryptedSymmetricKeys: fresh.encryptedSymmetricKeys,
         replyToMessageId: options.replyTo,
+        buttons: options.buttons,
       });
     }
 
@@ -354,9 +379,37 @@ export class SqueekBot extends EventEmitter {
 
     const payload = JSON.parse(body);
 
+    if (payload?.type === 'button_press') {
+      this.emit('button', payload as ButtonPress);
+      return Promise.resolve(null);
+    }
+
     if (payload?.type !== 'message') return Promise.resolve(null);
 
     return this.messageOf(Number(payload.chatId), payload.message);
+  }
+
+  /** Writes a post now and lets the server publish it later. Channels only. */
+  async schedule(chatId: number, text: string, publishAt: Date): Promise<number> {
+    const saved = await this.api.post<{ id: number }>('/messages/scheduled', {
+      chatId,
+      content: text,
+      publishAt: publishAt.toISOString(),
+    });
+
+    return Number(saved.id);
+  }
+
+  /** Posts of this bot's that have not gone out yet. */
+  scheduled(chatId?: number): Promise<
+    { id: number; chatId: number; content: string; publishAt: string }[]
+  > {
+    return this.api.get(`/messages/scheduled${chatId ? `?chatId=${chatId}` : ''}`);
+  }
+
+  /** Takes one back before it is published. */
+  async unschedule(id: number): Promise<void> {
+    await this.api.delete(`/messages/scheduled/${id}`);
   }
 
   /**
@@ -474,6 +527,11 @@ export class SqueekBot extends EventEmitter {
         if (data?.type === 'chats_changed') {
           this.chats.delete(Number(data.chatId));
           this.recipients.delete(Number(data.chatId));
+          return;
+        }
+
+        if (data?.type === 'button_press') {
+          this.emit('button', data as ButtonPress);
           return;
         }
 
