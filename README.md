@@ -29,7 +29,8 @@ whoever has it is the bot.
 ## What a bot can do
 
 - Answer in private chats: a person writes first, the bot replies. A bot
-  cannot start a chat with someone.
+  cannot start a chat with someone, and if they remove the chat or block
+  the bot, it goes quiet until they write again.
 - Be a member or an admin of groups and channels, and post there.
 - Post up to 30 messages a minute.
 
