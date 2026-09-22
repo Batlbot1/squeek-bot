@@ -234,4 +234,4 @@ bot.on('message', async (msg) => {
 
 ## Not yet
 
-Inline mode, keyboards.
+Inline mode — answering in someone else's chat without being a member of it.
