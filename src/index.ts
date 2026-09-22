@@ -359,6 +359,29 @@ export class SqueekBot extends EventEmitter {
     return this.messageOf(Number(payload.chatId), payload.message);
   }
 
+  /**
+   * Mutes someone in a group or channel for a while. The bot has to be an
+   * admin or a moderator there, and cannot touch anyone above it.
+   */
+  async mute(chatId: number, userId: number, minutes: number, reason?: string): Promise<void> {
+    await this.api.post(`/chats/${chatId}/restrictions`, {
+      userId,
+      kind: 'mute',
+      minutes,
+      reason,
+    });
+  }
+
+  /** Bans someone from a group or channel; they leave and cannot return. */
+  async ban(chatId: number, userId: number, reason?: string): Promise<void> {
+    await this.api.post(`/chats/${chatId}/restrictions`, { userId, kind: 'ban', reason });
+  }
+
+  /** Lifts a mute or a ban. */
+  async unrestrict(chatId: number, userId: number): Promise<void> {
+    await this.api.delete(`/chats/${chatId}/restrictions/${userId}`);
+  }
+
   /** Forgets what it knows about chats and members; the next send asks again. */
   async reloadChats(): Promise<void> {
     const rows = await this.api.chats();

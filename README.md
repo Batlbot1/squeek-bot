@@ -57,6 +57,9 @@ bot.setDescription(text)                     // the line under its name
 bot.setWebhook(url)                          // deliver to a URL instead of this socket
 bot.dropWebhook()                            // back to the socket
 bot.readWebhook(rawBody, signature, secret)  // one delivery, verified and opened
+bot.mute(chatId, userId, minutes, reason?)   // as an admin or moderator
+bot.ban(chatId, userId, reason?)
+bot.unrestrict(chatId, userId)
 bot.reloadChats()                 // forget cached members; the next send asks again
 
 msg.text        // decrypted
@@ -173,6 +176,21 @@ await bot.sendFile(chatId, { name: 'cpu.png', data: chart, mimeType: 'image/png'
 
 The whole file is held in memory while it is sealed — fine for a chart or a
 log, not for a film.
+
+## Keeping order
+
+Make the bot an admin or a moderator of a group or channel and it can mute,
+ban, and delete messages — the same powers a person of that rank has, and the
+same limits: it cannot touch anyone ranked above it.
+
+```js
+bot.on('message', async (msg) => {
+  if (!looksLikeSpam(msg.text)) return;
+
+  await bot.deleteMessage(msg.id);
+  await bot.mute(msg.chat.id, msg.from.id, 60, 'spam');
+});
+```
 
 ## Not yet
 
