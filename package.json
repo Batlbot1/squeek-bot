@@ -1,6 +1,6 @@
 {
   "name": "squeek-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Write a Squeek bot in a few lines: the library keeps the socket and does the end-to-end encryption for you.",
   "license": "MIT",
   "repository": {
