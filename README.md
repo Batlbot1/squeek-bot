@@ -48,7 +48,7 @@ bot.on('message', (msg) => …)     // every message in every chat the bot is in
 bot.on('connected' | 'disconnected' | 'error', …)
 
 bot.send(chatId, text, { replyTo? })   // resolves with the new message id
-bot.sendFile(chatId, { name, data, mimeType }, caption?)   // channels and discussions
+bot.sendFile(chatId, { name, data, mimeType }, caption?)   // any chat
 bot.editMessage(chatId, messageId, text)   // rewrite one of its own
 bot.deleteMessage(messageId)               // for everyone
 bot.react(messageId, emoji)                // toggle its own reaction
@@ -158,7 +158,22 @@ ciphertext sealed to the bot — this library opens it with the bot's key, and
 the server never could. Replying still needs `bot.start()` to have signed in;
 call it once when your process boots.
 
+## Files
+
+`sendFile` works in every chat. A channel or a discussion goes up as it is —
+the server seals those. A private chat or a group is sealed here, the same way
+the app does it: the caption under the message key, the bytes under a file key
+of their own, both sealed to every member.
+
+```js
+const chart = await fs.promises.readFile('cpu.png');
+
+await bot.sendFile(chatId, { name: 'cpu.png', data: chart, mimeType: 'image/png' }, 'Last hour');
+```
+
+The whole file is held in memory while it is sealed — fine for a chart or a
+log, not for a film.
+
 ## Not yet
 
-Files into private chats and groups (the chunked file format is not ported
-yet), inline mode, keyboards.
+Inline mode, keyboards.

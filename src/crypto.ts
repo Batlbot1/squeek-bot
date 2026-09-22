@@ -123,3 +123,117 @@ export const verifySignature = (body: string, signature: string, secret: string)
 
   return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
 };
+
+const CHUNK_BYTES = 256 * 1024;
+const FILE_KEY_BYTES = 32;
+
+/** Each chunk gets its own nonce; one nonce over two chunks would leak both. */
+const chunkNonce = (baseNonce: Uint8Array, index: number): Uint8Array => {
+  const nonce = baseNonce.slice();
+  const offset = nonce.length - 4;
+
+  nonce[offset] ^= (index >>> 24) & 0xff;
+  nonce[offset + 1] ^= (index >>> 16) & 0xff;
+  nonce[offset + 2] ^= (index >>> 8) & 0xff;
+  nonce[offset + 3] ^= index & 0xff;
+
+  return nonce;
+};
+
+/**
+ * Binds a chunk to its place and marks the last one, so a file that arrives
+ * truncated or reordered fails to open rather than quietly decoding short.
+ */
+const chunkAad = (index: number, isLast: boolean): Uint8Array =>
+  Uint8Array.from([
+    (index >>> 24) & 0xff,
+    (index >>> 16) & 0xff,
+    (index >>> 8) & 0xff,
+    index & 0xff,
+    isLast ? 1 : 0,
+  ]);
+
+export type EncryptedFile = {
+  /** The bytes to upload: the 24-byte nonce, then the sealed chunks. */
+  body: Uint8Array;
+  /** userId -> sealed file key. */
+  fileEncryptedSymmetricKeys: Record<string, string>;
+};
+
+/**
+ * Seals a file the way the app does: one key for the file, chunks of 256 KiB
+ * each under their own nonce, and that key sealed to every recipient.
+ *
+ * The app streams chunk by chunk because a phone holding a 40 MB video three
+ * times over crashes; a bot sending a chart or a log does not, so this keeps
+ * the whole thing in memory and stays short.
+ */
+export const encryptFile = (data: Uint8Array, recipients: Recipient[]): EncryptedFile => {
+  const fileKey = randomBytes(FILE_KEY_BYTES);
+  const baseNonce = randomBytes(NONCE_BYTES);
+  const total = Math.max(1, Math.ceil(data.length / CHUNK_BYTES));
+  const parts: Uint8Array[] = [baseNonce];
+
+  for (let index = 0; index < total; index += 1) {
+    const start = index * CHUNK_BYTES;
+    const plain = data.subarray(start, Math.min(start + CHUNK_BYTES, data.length));
+    const isLast = index === total - 1;
+
+    parts.push(
+      xchacha20poly1305(fileKey, chunkNonce(baseNonce, index), chunkAad(index, isLast)).encrypt(plain),
+    );
+  }
+
+  const size = parts.reduce((sum, part) => sum + part.length, 0);
+  const body = new Uint8Array(size);
+  let offset = 0;
+
+  for (const part of parts) {
+    body.set(part, offset);
+    offset += part.length;
+  }
+
+  const fileEncryptedSymmetricKeys: Record<string, string> = {};
+
+  for (const recipient of recipients) {
+    if (!/^[0-9a-f]{64}$/.test(recipient.publicKey ?? '')) continue;
+    fileEncryptedSymmetricKeys[String(recipient.userId)] = sealTo(recipient.publicKey, fileKey);
+  }
+
+  if (!Object.keys(fileEncryptedSymmetricKeys).length) {
+    throw new Error('Nobody in this chat has a key to seal to');
+  }
+
+  return { body, fileEncryptedSymmetricKeys };
+};
+
+/** Opens a file sealed by encryptFile, given the key sealed to this bot. */
+export const decryptFile = (body: Uint8Array, sealedKey: string, secretKeyHex: string): Uint8Array => {
+  const fileKey = openSealed(sealedKey, secretKeyHex);
+  const baseNonce = body.subarray(0, NONCE_BYTES);
+  const sealed = body.subarray(NONCE_BYTES);
+  const sealedChunk = CHUNK_BYTES + 16;
+  const total = Math.max(1, Math.ceil(sealed.length / sealedChunk));
+  const parts: Uint8Array[] = [];
+
+  for (let index = 0; index < total; index += 1) {
+    const start = index * sealedChunk;
+    const chunk = sealed.subarray(start, Math.min(start + sealedChunk, sealed.length));
+    const isLast = index === total - 1;
+
+    parts.push(
+      xchacha20poly1305(fileKey, chunkNonce(baseNonce, index), chunkAad(index, isLast)).decrypt(chunk),
+    );
+  }
+
+  const size = parts.reduce((sum, part) => sum + part.length, 0);
+  const plain = new Uint8Array(size);
+  let offset = 0;
+
+  for (const part of parts) {
+    plain.set(part, offset);
+    offset += part.length;
+  }
+
+  return plain;
+};

@@ -2,9 +2,24 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { SqueekApi } from './api';
-import { decryptMessage, encryptMessage, publicKeyOf, verifySignature, type Recipient } from './crypto';
+import {
+  decryptMessage,
+  encryptFile,
+  encryptMessage,
+  publicKeyOf,
+  verifySignature,
+  type Recipient,
+} from './crypto';
 
-export { encryptMessage, decryptMessage, sealTo, openSealed, verifySignature } from './crypto';
+export {
+  encryptMessage,
+  decryptMessage,
+  encryptFile,
+  decryptFile,
+  sealTo,
+  openSealed,
+  verifySignature,
+} from './crypto';
 
 /** The token from the app: "<bot id>:<secret key>:<login secret>". */
 export type BotToken = { botId: number; secretKey: string; loginSecret: string };
@@ -196,10 +211,10 @@ export class SqueekBot extends EventEmitter {
   }
 
   /**
-   * Sends a file into a channel or discussion. Private chats and groups
-   * seal files chunk by chunk on the device; that part of the format is
-   * not in this library yet, so it says so instead of sending something a
-   * phone could not open.
+   * Sends a file. A channel or discussion goes up as it is — the server
+   * seals those. A private chat or group is sealed here: the caption under
+   * the message key, the bytes under a file key of their own, both sealed
+   * to every member.
    */
   async sendFile(
     chatId: number,
@@ -207,21 +222,44 @@ export class SqueekBot extends EventEmitter {
     caption = '',
   ): Promise<void> {
     const chat = await this.chatOf(chatId);
+    const bytes = new Uint8Array(file.data.byteLength);
 
-    if (!isServerEncrypted(chat.type)) {
-      throw new Error('Files to private chats and groups are not supported yet; channels and discussions are');
-    }
+    bytes.set(file.data);
 
     const form = new FormData();
 
     form.append('chatId', String(chatId));
-    form.append('content', caption);
-    form.append('encryptedSymmetricKeys', '{}');
-    form.append('fileEncryptedSymmetricKeys', '{}');
-    const bytes = new Uint8Array(file.data.byteLength);
 
-    bytes.set(file.data);
-    form.append('file', new Blob([bytes], { type: file.mimeType }), file.name);
+    if (isServerEncrypted(chat.type)) {
+      form.append('content', caption);
+      form.append('encryptedSymmetricKeys', '{}');
+      form.append('fileEncryptedSymmetricKeys', '{}');
+      form.append('file', new Blob([bytes], { type: file.mimeType }), file.name);
+
+      await this.api.upload(form);
+      return;
+    }
+
+    const recipients = await this.recipientsOf(chatId);
+    // A caption is optional, but the message still needs a body sealed to
+    // everyone; an empty string seals to an empty string.
+    const envelope = encryptMessage(caption, recipients);
+    const sealedFile = encryptFile(bytes, recipients);
+
+    form.append('content', envelope.content);
+    form.append('encryptedSymmetricKeys', JSON.stringify(envelope.encryptedSymmetricKeys));
+    form.append(
+      'fileEncryptedSymmetricKeys',
+      JSON.stringify(sealedFile.fileEncryptedSymmetricKeys),
+    );
+    form.append(
+      'file',
+      // Copied into a plain ArrayBuffer: a subarray view is not a BlobPart.
+      new Blob([sealedFile.body.slice().buffer as ArrayBuffer], {
+        type: 'application/octet-stream',
+      }),
+      file.name,
+    );
 
     await this.api.upload(form);
   }
