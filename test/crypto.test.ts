@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-import { decryptMessage, encryptMessage, openSealed, sealTo, publicKeyOf } from '../src/crypto';
+import { createHmac } from 'node:crypto';
+import { decryptMessage, encryptMessage, openSealed, sealTo, publicKeyOf, verifySignature } from '../src/crypto';
 import { parseToken } from '../src/index';
 
 const keypair = () => {
@@ -36,4 +37,15 @@ test('the token has three parts', () => {
 
   assert.deepEqual(parsed, { botId: 42, secretKey: 'a'.repeat(64), loginSecret: 'b'.repeat(64) });
   assert.throws(() => parseToken('nope'));
+});
+
+test('a webhook signature verifies only under its own secret and body', () => {
+  const body = JSON.stringify({ type: 'message', chatId: 1 });
+  const secret = 'a'.repeat(48);
+  const signature = createHmac('sha256', secret).update(body).digest('hex');
+
+  assert.equal(verifySignature(body, signature, secret), true);
+  assert.equal(verifySignature(body + ' ', signature, secret), false);
+  assert.equal(verifySignature(body, signature, 'b'.repeat(48)), false);
+  assert.equal(verifySignature(body, 'short', secret), false);
 });

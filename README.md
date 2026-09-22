@@ -54,6 +54,9 @@ bot.deleteMessage(messageId)               // for everyone
 bot.react(messageId, emoji)                // toggle its own reaction
 bot.setCommands([{ command, description }])  // the menu people see after "/"
 bot.setDescription(text)                     // the line under its name
+bot.setWebhook(url)                          // deliver to a URL instead of this socket
+bot.dropWebhook()                            // back to the socket
+bot.readWebhook(rawBody, signature, secret)  // one delivery, verified and opened
 bot.reloadChats()                 // forget cached members; the next send asks again
 
 msg.text        // decrypted
@@ -127,6 +130,33 @@ curl https://api.squeek.net/messages -H "authorization: Bearer $ACCESS" \
 
 Private chats and groups are end-to-end encrypted and need the envelope this
 library builds; there is no way around that, and that is the point.
+
+## Without a socket
+
+A bot that has nowhere to run day and night can name a URL instead. The server
+then POSTs every message it would have delivered over the socket, signed:
+
+```js
+const { url, secret } = await bot.setWebhook('https://my-bot.example/squeek');
+// keep `secret` — it signs every delivery
+```
+
+```js
+// your http handler, e.g. express
+app.post('/squeek', express.raw({ type: '*/*' }), async (req, res) => {
+  const msg = await bot.readWebhook(req.body.toString(), req.get('x-squeek-signature'), SECRET);
+
+  res.sendStatus(200);           // answer first, work after
+
+  if (msg?.text === '/hi') await msg.reply('Hi there! 🐀');
+});
+```
+
+`readWebhook` throws when the signature does not match, so an unsigned request
+never reaches your code. The body of a private chat or group is still the
+ciphertext sealed to the bot — this library opens it with the bot's key, and
+the server never could. Replying still needs `bot.start()` to have signed in;
+call it once when your process boots.
 
 ## Not yet
 

@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 /**
  * The envelope, exactly as the Squeek app builds and opens it
  * (rattus-messenger, lib/crypto/envelope.ts). Keep the two in step: a bot
@@ -109,3 +110,16 @@ export const decryptMessage = (content: string, sealedKey: string, secretKeyHex:
 
 export const publicKeyOf = (secretKeyHex: string): string =>
   bytesToHex(x25519.getPublicKey(hexToBytes(secretKeyHex)));
+
+/**
+ * Whether a webhook delivery really came from Squeek: the signature is an
+ * HMAC-SHA256 of the raw body under the secret the server handed out when
+ * the URL was set. Compared in constant time.
+ */
+export const verifySignature = (body: string, signature: string, secret: string): boolean => {
+  const expected = createHmac('sha256', secret).update(body).digest('hex');
+
+  if (expected.length !== signature.length) return false;
+
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+};

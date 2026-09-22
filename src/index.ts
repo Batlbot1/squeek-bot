@@ -2,9 +2,9 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { SqueekApi } from './api';
-import { decryptMessage, encryptMessage, publicKeyOf, type Recipient } from './crypto';
+import { decryptMessage, encryptMessage, publicKeyOf, verifySignature, type Recipient } from './crypto';
 
-export { encryptMessage, decryptMessage, sealTo, openSealed } from './crypto';
+export { encryptMessage, decryptMessage, sealTo, openSealed, verifySignature } from './crypto';
 
 /** The token from the app: "<bot id>:<secret key>:<login secret>". */
 export type BotToken = { botId: number; secretKey: string; loginSecret: string };
@@ -288,6 +288,39 @@ export class SqueekBot extends EventEmitter {
     await this.api.patch(`/bots/${this.id}`, { bio });
   }
 
+  /**
+   * Points the server at a URL of yours instead of this socket: from then
+   * on every message the bot would have received is POSTed there, signed.
+   * The signing secret comes back once — keep it to verify deliveries.
+   */
+  async setWebhook(url: string): Promise<{ url: string; secret: string }> {
+    return this.api.post(`/bots/${this.id}/outgoing-webhook`, { url });
+  }
+
+  /** Back to the socket: the server forgets the URL. */
+  async dropWebhook(): Promise<void> {
+    await this.api.delete(`/bots/${this.id}/outgoing-webhook`);
+  }
+
+  /**
+   * Opens one delivery that arrived at your webhook. Verify the signature
+   * first — `verifyWebhook` does both:
+   *
+   *   const msg = bot.readWebhook(rawBody, headers['x-squeek-signature'], secret);
+   *   if (msg) await msg.reply('got it');
+   */
+  readWebhook(body: string, signature: string, secret: string): Promise<Message | null> {
+    if (!verifySignature(body, signature, secret)) {
+      throw new Error('The signature does not match; this did not come from Squeek');
+    }
+
+    const payload = JSON.parse(body);
+
+    if (payload?.type !== 'message') return Promise.resolve(null);
+
+    return this.messageOf(Number(payload.chatId), payload.message);
+  }
+
   /** Forgets what it knows about chats and members; the next send asks again. */
   async reloadChats(): Promise<void> {
     const rows = await this.api.chats();
@@ -415,28 +448,35 @@ export class SqueekBot extends EventEmitter {
     });
   }
 
+  /**
+   * One stored row as a Message: the chat it belongs to, and the text,
+   * opened with the bot's key unless the server sealed it. Null for a
+   * system line, a deleted message, or one not sealed to this bot.
+   */
+  private async messageOf(chatId: number, raw: any): Promise<Message | null> {
+    if (!raw || raw.deletedAt || raw.system) return null;
+
+    const chat = await this.chatOf(chatId);
+    let text = '';
+
+    if (raw.encryption === 'server') {
+      text = String(raw.content ?? '');
+    } else {
+      const sealedKey = raw.encryptedSymmetricKeys?.[String(this.id)] ?? raw.encryptedKey ?? null;
+
+      if (!sealedKey) return null;
+
+      text = decryptMessage(String(raw.content ?? ''), sealedKey, this.secretKey);
+    }
+
+    return new Message(this, raw, chat, text);
+  }
+
   private async handleMessage(chatId: number, raw: any): Promise<void> {
     try {
-      if (!raw || raw.deletedAt) return;
+      const message = await this.messageOf(chatId, raw);
 
-      const chat = await this.chatOf(chatId);
-      let text = '';
-
-      if (raw.system) {
-        return;
-      } else if (raw.encryption === 'server') {
-        text = String(raw.content ?? '');
-      } else {
-        const sealedKey = raw.encryptedSymmetricKeys?.[String(this.id)] ?? raw.encryptedKey ?? null;
-
-        if (!sealedKey) return;
-
-        text = decryptMessage(String(raw.content ?? ''), sealedKey, this.secretKey);
-      }
-
-      const message = new Message(this, raw, chat, text);
-
-      if (message.isMine) return;
+      if (!message || message.isMine) return;
 
       this.emit('message', message);
     } catch (error) {
