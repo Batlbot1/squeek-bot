@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { SqueekApi } from './api';
 import { decryptMessage, encryptMessage, publicKeyOf, type Recipient } from './crypto';
@@ -50,8 +51,8 @@ export class Message {
     return this.from.id === this.bot.id;
   }
 
-  /** Answers in the same chat, quoting this message. */
-  reply(text: string): Promise<void> {
+  /** Answers in the same chat, quoting this message; gives the new id. */
+  reply(text: string): Promise<number> {
     return this.bot.send(this.chat.id, text, { replyTo: this.id });
   }
 
@@ -96,6 +97,8 @@ export class SqueekBot extends EventEmitter {
   private backoff = 1000;
   private ping: NodeJS.Timeout | null = null;
   private chats = new Map<number, Chat>();
+  /** Sends waiting for the gateway to echo their stored id back. */
+  private pendingSends = new Map<string, (id: number) => void>();
   private recipients = new Map<number, Recipient[]>();
 
   constructor(token: string, options: SqueekBotOptions = {}) {
@@ -128,14 +131,18 @@ export class SqueekBot extends EventEmitter {
    * to every member; a channel or discussion goes as it is, the server seals
    * those. Bots may post thirty messages a minute.
    */
-  async send(chatId: number, text: string, options: { replyTo?: number } = {}): Promise<void> {
+  async send(chatId: number, text: string, options: { replyTo?: number } = {}): Promise<number> {
     const chat = await this.chatOf(chatId);
 
     if (isServerEncrypted(chat.type)) {
-      await this.api.postToChannel(chatId, text, options.replyTo);
-      return;
+      const stored = await this.api.postToChannel(chatId, text, options.replyTo);
+      return Number(stored.id);
     }
 
+    // The gateway answers nothing to a send; it echoes the stored message
+    // back with this label on it, which is how the id gets here.
+    const clientId = randomUUID();
+    const stored = this.awaitEcho(clientId);
     const envelope = encryptMessage(text, await this.recipientsOf(chatId));
 
     try {
@@ -143,6 +150,7 @@ export class SqueekBot extends EventEmitter {
         type: 'new_message',
         token: this.api.accessToken,
         chatId,
+        clientId,
         content: envelope.content,
         encryptedSymmetricKeys: envelope.encryptedSymmetricKeys,
         replyToMessageId: options.replyTo,
@@ -156,11 +164,35 @@ export class SqueekBot extends EventEmitter {
         type: 'new_message',
         token: this.api.accessToken,
         chatId,
+        clientId,
         content: fresh.content,
         encryptedSymmetricKeys: fresh.encryptedSymmetricKeys,
         replyToMessageId: options.replyTo,
       });
     }
+
+    return stored;
+  }
+
+  /**
+   * The id of the message just sent, from the echo the gateway addresses
+   * back to the sender. Ten seconds is generous for a round trip; past
+   * that the message is sent and its id simply is not known, which is
+   * worth an error only if the caller wanted to edit it.
+   */
+  private awaitEcho(clientId: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSends.delete(clientId);
+        reject(new Error('The message was sent, but the server did not echo its id'));
+      }, 10_000);
+
+      this.pendingSends.set(clientId, (id) => {
+        clearTimeout(timer);
+        this.pendingSends.delete(clientId);
+        resolve(id);
+      });
+    });
   }
 
   /**
@@ -352,6 +384,10 @@ export class SqueekBot extends EventEmitter {
         }
 
         if (data?.type === 'new_message') {
+          const echo = typeof data.clientId === 'string' ? this.pendingSends.get(data.clientId) : undefined;
+
+          if (echo) echo(Number(data.message?.id));
+
           void this.handleMessage(Number(data.chatId), data.message);
         }
       });

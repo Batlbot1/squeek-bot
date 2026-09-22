@@ -47,7 +47,7 @@ bot.stop()
 bot.on('message', (msg) => …)     // every message in every chat the bot is in
 bot.on('connected' | 'disconnected' | 'error', …)
 
-bot.send(chatId, text, { replyTo? })
+bot.send(chatId, text, { replyTo? })   // resolves with the new message id
 bot.sendFile(chatId, { name, data, mimeType }, caption?)   // channels and discussions
 bot.editMessage(chatId, messageId, text)   // rewrite one of its own
 bot.deleteMessage(messageId)               // for everyone
@@ -61,8 +61,25 @@ msg.chat        // { id, type, name }
 msg.from        // { id, username, name }
 msg.id
 msg.raw         // the row as the gateway sent it
-msg.reply(text)
+msg.reply(text)   // resolves with the new message id
 msg.react(emoji)
+```
+
+## Editing what it already said
+
+`send()` and `reply()` resolve with the id of the stored message, so a bot can
+rewrite one line instead of sending five:
+
+```js
+bot.on('message', async (msg) => {
+  if (msg.text !== '/backup') return;
+
+  await msg.react('👀');
+  const id = await bot.send(msg.chat.id, 'Backup: running…');
+
+  await makeBackup();
+  await bot.editMessage(msg.chat.id, id, 'Backup: done ✅');
+});
 ```
 
 ## Commands
