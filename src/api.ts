@@ -61,12 +61,30 @@ export class SqueekApi {
   }
 
   /** A post to a channel or discussion; the server seals it. */
-  postToChannel(chatId: number, content: string, replyToMessageId?: number) {
-    return this.post<{ id: number }>('/messages', { chatId, content, replyToMessageId });
+  postToChannel(
+    chatId: number,
+    content: string,
+    replyToMessageId?: number,
+    buttons?: { label: string; data: string }[],
+  ) {
+    return this.post<{ id: number }>('/messages', {
+      chatId,
+      content,
+      replyToMessageId,
+      buttons,
+    });
   }
 
   get<T>(path: string): Promise<T> {
     return this.authed<T>('GET', path);
+  }
+
+  patch<T>(path: string, body: unknown): Promise<T> {
+    return this.authed<T>('PATCH', path, body);
+  }
+
+  delete<T>(path: string): Promise<T> {
+    return this.authed<T>('DELETE', path);
   }
 
   post<T>(path: string, body: unknown): Promise<T> {

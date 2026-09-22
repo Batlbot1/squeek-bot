@@ -1,9 +1,25 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { SqueekApi } from './api';
-import { decryptMessage, encryptMessage, publicKeyOf, type Recipient } from './crypto';
+import {
+  decryptMessage,
+  encryptFile,
+  encryptMessage,
+  publicKeyOf,
+  verifySignature,
+  type Recipient,
+} from './crypto';
 
-export { encryptMessage, decryptMessage, sealTo, openSealed } from './crypto';
+export {
+  encryptMessage,
+  decryptMessage,
+  encryptFile,
+  decryptFile,
+  sealTo,
+  openSealed,
+  verifySignature,
+} from './crypto';
 
 /** The token from the app: "<bot id>:<secret key>:<login secret>". */
 export type BotToken = { botId: number; secretKey: string; loginSecret: string };
@@ -19,6 +35,23 @@ export const parseToken = (token: string): BotToken => {
 };
 
 export type Chat = { id: number; type: string; name: string | null };
+
+/** One entry of the menu people see when they type "/" in a chat with the bot. */
+export type BotCommand = { command: string; description: string };
+
+/**
+ * A button under a message. `label` is what people read, `data` is what
+ * comes back to the bot when they press — it never leaves the bot's world.
+ */
+export type BotButton = { label: string; data: string };
+
+/** Someone pressed one of the bot's buttons. */
+export type ButtonPress = {
+  chatId: number;
+  messageId: number;
+  data: string;
+  from: { id: number; username: string; name: string };
+};
 
 /** One message, decrypted, as the bot sees it. */
 export class Message {
@@ -47,9 +80,14 @@ export class Message {
     return this.from.id === this.bot.id;
   }
 
-  /** Answers in the same chat, quoting this message. */
-  reply(text: string): Promise<void> {
+  /** Answers in the same chat, quoting this message; gives the new id. */
+  reply(text: string): Promise<number> {
     return this.bot.send(this.chat.id, text, { replyTo: this.id });
+  }
+
+  /** Puts an emoji on this message — «seen it», without a sentence. */
+  react(emoji: string): Promise<void> {
+    return this.bot.react(this.id, emoji);
   }
 }
 
@@ -88,6 +126,8 @@ export class SqueekBot extends EventEmitter {
   private backoff = 1000;
   private ping: NodeJS.Timeout | null = null;
   private chats = new Map<number, Chat>();
+  /** Sends waiting for the gateway to echo their stored id back. */
+  private pendingSends = new Map<string, (id: number) => void>();
   private recipients = new Map<number, Recipient[]>();
 
   constructor(token: string, options: SqueekBotOptions = {}) {
@@ -120,14 +160,27 @@ export class SqueekBot extends EventEmitter {
    * to every member; a channel or discussion goes as it is, the server seals
    * those. Bots may post thirty messages a minute.
    */
-  async send(chatId: number, text: string, options: { replyTo?: number } = {}): Promise<void> {
+  async send(
+    chatId: number,
+    text: string,
+    options: { replyTo?: number; buttons?: BotButton[] } = {},
+  ): Promise<number> {
     const chat = await this.chatOf(chatId);
 
     if (isServerEncrypted(chat.type)) {
-      await this.api.postToChannel(chatId, text, options.replyTo);
-      return;
+      const stored = await this.api.postToChannel(
+        chatId,
+        text,
+        options.replyTo,
+        options.buttons,
+      );
+      return Number(stored.id);
     }
 
+    // The gateway answers nothing to a send; it echoes the stored message
+    // back with this label on it, which is how the id gets here.
+    const clientId = randomUUID();
+    const stored = this.awaitEcho(clientId);
     const envelope = encryptMessage(text, await this.recipientsOf(chatId));
 
     try {
@@ -135,9 +188,11 @@ export class SqueekBot extends EventEmitter {
         type: 'new_message',
         token: this.api.accessToken,
         chatId,
+        clientId,
         content: envelope.content,
         encryptedSymmetricKeys: envelope.encryptedSymmetricKeys,
         replyToMessageId: options.replyTo,
+        buttons: options.buttons,
       });
     } catch (error) {
       // The member list has moved under us: fetch it again and retry once.
@@ -148,18 +203,43 @@ export class SqueekBot extends EventEmitter {
         type: 'new_message',
         token: this.api.accessToken,
         chatId,
+        clientId,
         content: fresh.content,
         encryptedSymmetricKeys: fresh.encryptedSymmetricKeys,
         replyToMessageId: options.replyTo,
+        buttons: options.buttons,
       });
     }
+
+    return stored;
   }
 
   /**
-   * Sends a file into a channel or discussion. Private chats and groups
-   * seal files chunk by chunk on the device; that part of the format is
-   * not in this library yet, so it says so instead of sending something a
-   * phone could not open.
+   * The id of the message just sent, from the echo the gateway addresses
+   * back to the sender. Ten seconds is generous for a round trip; past
+   * that the message is sent and its id simply is not known, which is
+   * worth an error only if the caller wanted to edit it.
+   */
+  private awaitEcho(clientId: string): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSends.delete(clientId);
+        reject(new Error('The message was sent, but the server did not echo its id'));
+      }, 10_000);
+
+      this.pendingSends.set(clientId, (id) => {
+        clearTimeout(timer);
+        this.pendingSends.delete(clientId);
+        resolve(id);
+      });
+    });
+  }
+
+  /**
+   * Sends a file. A channel or discussion goes up as it is — the server
+   * seals those. A private chat or group is sealed here: the caption under
+   * the message key, the bytes under a file key of their own, both sealed
+   * to every member.
    */
   async sendFile(
     chatId: number,
@@ -167,23 +247,192 @@ export class SqueekBot extends EventEmitter {
     caption = '',
   ): Promise<void> {
     const chat = await this.chatOf(chatId);
+    const bytes = new Uint8Array(file.data.byteLength);
 
-    if (!isServerEncrypted(chat.type)) {
-      throw new Error('Files to private chats and groups are not supported yet; channels and discussions are');
-    }
+    bytes.set(file.data);
 
     const form = new FormData();
 
     form.append('chatId', String(chatId));
-    form.append('content', caption);
-    form.append('encryptedSymmetricKeys', '{}');
-    form.append('fileEncryptedSymmetricKeys', '{}');
-    const bytes = new Uint8Array(file.data.byteLength);
 
-    bytes.set(file.data);
-    form.append('file', new Blob([bytes], { type: file.mimeType }), file.name);
+    if (isServerEncrypted(chat.type)) {
+      form.append('content', caption);
+      form.append('encryptedSymmetricKeys', '{}');
+      form.append('fileEncryptedSymmetricKeys', '{}');
+      form.append('file', new Blob([bytes], { type: file.mimeType }), file.name);
+
+      await this.api.upload(form);
+      return;
+    }
+
+    const recipients = await this.recipientsOf(chatId);
+    // A caption is optional, but the message still needs a body sealed to
+    // everyone; an empty string seals to an empty string.
+    const envelope = encryptMessage(caption, recipients);
+    const sealedFile = encryptFile(bytes, recipients);
+
+    form.append('content', envelope.content);
+    form.append('encryptedSymmetricKeys', JSON.stringify(envelope.encryptedSymmetricKeys));
+    form.append(
+      'fileEncryptedSymmetricKeys',
+      JSON.stringify(sealedFile.fileEncryptedSymmetricKeys),
+    );
+    form.append(
+      'file',
+      // Copied into a plain ArrayBuffer: a subarray view is not a BlobPart.
+      new Blob([sealedFile.body.slice().buffer as ArrayBuffer], {
+        type: 'application/octet-stream',
+      }),
+      file.name,
+    );
 
     await this.api.upload(form);
+  }
+
+  /**
+   * Rewrites one of the bot's own messages. A channel or discussion is
+   * sealed by the server; elsewhere the new text is sealed here, to the
+   * same members the original went to.
+   */
+  async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
+    const chat = await this.chatOf(chatId);
+
+    if (isServerEncrypted(chat.type)) {
+      await this.sendFrame({
+        type: 'edit_message',
+        token: this.api.accessToken,
+        messageId,
+        content: text,
+      });
+      return;
+    }
+
+    const envelope = encryptMessage(text, await this.recipientsOf(chatId));
+
+    await this.sendFrame({
+      type: 'edit_message',
+      token: this.api.accessToken,
+      messageId,
+      content: envelope.content,
+      encryptedSymmetricKeys: envelope.encryptedSymmetricKeys,
+    });
+  }
+
+  /** Deletes one of the bot's own messages for everyone. */
+  async deleteMessage(messageId: number): Promise<void> {
+    await this.sendFrame({
+      type: 'delete_message',
+      token: this.api.accessToken,
+      messageId,
+    });
+  }
+
+  /** Puts an emoji on a message, or takes the bot's own off again. */
+  async react(messageId: number, emoji: string): Promise<void> {
+    await this.sendFrame({
+      type: 'message_reaction',
+      token: this.api.accessToken,
+      messageId,
+      emoji,
+    });
+  }
+
+  /**
+   * Declares what the bot answers to. People see the list on its profile
+   * and in the composer when they type a slash; what a command does is
+   * still this program's business. Usually called once, after start().
+   */
+  async setCommands(commands: BotCommand[]): Promise<void> {
+    await this.api.patch(`/bots/${this.id}`, { commands });
+  }
+
+  /** The line under the bot's name on its profile. */
+  async setDescription(bio: string): Promise<void> {
+    await this.api.patch(`/bots/${this.id}`, { bio });
+  }
+
+  /**
+   * Points the server at a URL of yours instead of this socket: from then
+   * on every message the bot would have received is POSTed there, signed.
+   * The signing secret comes back once — keep it to verify deliveries.
+   */
+  async setWebhook(url: string): Promise<{ url: string; secret: string }> {
+    return this.api.post(`/bots/${this.id}/outgoing-webhook`, { url });
+  }
+
+  /** Back to the socket: the server forgets the URL. */
+  async dropWebhook(): Promise<void> {
+    await this.api.delete(`/bots/${this.id}/outgoing-webhook`);
+  }
+
+  /**
+   * Opens one delivery that arrived at your webhook. Verify the signature
+   * first — `verifyWebhook` does both:
+   *
+   *   const msg = bot.readWebhook(rawBody, headers['x-squeek-signature'], secret);
+   *   if (msg) await msg.reply('got it');
+   */
+  readWebhook(body: string, signature: string, secret: string): Promise<Message | null> {
+    if (!verifySignature(body, signature, secret)) {
+      throw new Error('The signature does not match; this did not come from Squeek');
+    }
+
+    const payload = JSON.parse(body);
+
+    if (payload?.type === 'button_press') {
+      this.emit('button', payload as ButtonPress);
+      return Promise.resolve(null);
+    }
+
+    if (payload?.type !== 'message') return Promise.resolve(null);
+
+    return this.messageOf(Number(payload.chatId), payload.message);
+  }
+
+  /** Writes a post now and lets the server publish it later. Channels only. */
+  async schedule(chatId: number, text: string, publishAt: Date): Promise<number> {
+    const saved = await this.api.post<{ id: number }>('/messages/scheduled', {
+      chatId,
+      content: text,
+      publishAt: publishAt.toISOString(),
+    });
+
+    return Number(saved.id);
+  }
+
+  /** Posts of this bot's that have not gone out yet. */
+  scheduled(chatId?: number): Promise<
+    { id: number; chatId: number; content: string; publishAt: string }[]
+  > {
+    return this.api.get(`/messages/scheduled${chatId ? `?chatId=${chatId}` : ''}`);
+  }
+
+  /** Takes one back before it is published. */
+  async unschedule(id: number): Promise<void> {
+    await this.api.delete(`/messages/scheduled/${id}`);
+  }
+
+  /**
+   * Mutes someone in a group or channel for a while. The bot has to be an
+   * admin or a moderator there, and cannot touch anyone above it.
+   */
+  async mute(chatId: number, userId: number, minutes: number, reason?: string): Promise<void> {
+    await this.api.post(`/chats/${chatId}/restrictions`, {
+      userId,
+      kind: 'mute',
+      minutes,
+      reason,
+    });
+  }
+
+  /** Bans someone from a group or channel; they leave and cannot return. */
+  async ban(chatId: number, userId: number, reason?: string): Promise<void> {
+    await this.api.post(`/chats/${chatId}/restrictions`, { userId, kind: 'ban', reason });
+  }
+
+  /** Lifts a mute or a ban. */
+  async unrestrict(chatId: number, userId: number): Promise<void> {
+    await this.api.delete(`/chats/${chatId}/restrictions/${userId}`);
   }
 
   /** Forgets what it knows about chats and members; the next send asks again. */
@@ -281,7 +530,16 @@ export class SqueekBot extends EventEmitter {
           return;
         }
 
+        if (data?.type === 'button_press') {
+          this.emit('button', data as ButtonPress);
+          return;
+        }
+
         if (data?.type === 'new_message') {
+          const echo = typeof data.clientId === 'string' ? this.pendingSends.get(data.clientId) : undefined;
+
+          if (echo) echo(Number(data.message?.id));
+
           void this.handleMessage(Number(data.chatId), data.message);
         }
       });
@@ -309,28 +567,35 @@ export class SqueekBot extends EventEmitter {
     });
   }
 
+  /**
+   * One stored row as a Message: the chat it belongs to, and the text,
+   * opened with the bot's key unless the server sealed it. Null for a
+   * system line, a deleted message, or one not sealed to this bot.
+   */
+  private async messageOf(chatId: number, raw: any): Promise<Message | null> {
+    if (!raw || raw.deletedAt || raw.system) return null;
+
+    const chat = await this.chatOf(chatId);
+    let text = '';
+
+    if (raw.encryption === 'server') {
+      text = String(raw.content ?? '');
+    } else {
+      const sealedKey = raw.encryptedSymmetricKeys?.[String(this.id)] ?? raw.encryptedKey ?? null;
+
+      if (!sealedKey) return null;
+
+      text = decryptMessage(String(raw.content ?? ''), sealedKey, this.secretKey);
+    }
+
+    return new Message(this, raw, chat, text);
+  }
+
   private async handleMessage(chatId: number, raw: any): Promise<void> {
     try {
-      if (!raw || raw.deletedAt) return;
+      const message = await this.messageOf(chatId, raw);
 
-      const chat = await this.chatOf(chatId);
-      let text = '';
-
-      if (raw.system) {
-        return;
-      } else if (raw.encryption === 'server') {
-        text = String(raw.content ?? '');
-      } else {
-        const sealedKey = raw.encryptedSymmetricKeys?.[String(this.id)] ?? raw.encryptedKey ?? null;
-
-        if (!sealedKey) return;
-
-        text = decryptMessage(String(raw.content ?? ''), sealedKey, this.secretKey);
-      }
-
-      const message = new Message(this, raw, chat, text);
-
-      if (message.isMine) return;
+      if (!message || message.isMine) return;
 
       this.emit('message', message);
     } catch (error) {

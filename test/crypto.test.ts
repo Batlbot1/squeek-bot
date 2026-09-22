@@ -2,7 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-import { decryptMessage, encryptMessage, openSealed, sealTo, publicKeyOf } from '../src/crypto';
+import { createHmac } from 'node:crypto';
+import {
+  decryptMessage,
+  encryptMessage,
+  encryptFile,
+  decryptFile,
+  openSealed,
+  sealTo,
+  publicKeyOf,
+  verifySignature,
+} from '../src/crypto';
 import { parseToken } from '../src/index';
 
 const keypair = () => {
@@ -36,4 +46,38 @@ test('the token has three parts', () => {
 
   assert.deepEqual(parsed, { botId: 42, secretKey: 'a'.repeat(64), loginSecret: 'b'.repeat(64) });
   assert.throws(() => parseToken('nope'));
+});
+
+test('a webhook signature verifies only under its own secret and body', () => {
+  const body = JSON.stringify({ type: 'message', chatId: 1 });
+  const secret = 'a'.repeat(48);
+  const signature = createHmac('sha256', secret).update(body).digest('hex');
+
+  assert.equal(verifySignature(body, signature, secret), true);
+  assert.equal(verifySignature(body + ' ', signature, secret), false);
+  assert.equal(verifySignature(body, signature, 'b'.repeat(48)), false);
+  assert.equal(verifySignature(body, 'short', secret), false);
+});
+
+test('a sealed file opens again, chunk boundaries included', () => {
+  const bot = keypair();
+  const recipients = [{ userId: 7, publicKey: bot.publicKey }];
+
+  for (const size of [0, 1, 256 * 1024, 256 * 1024 + 1, 600 * 1024]) {
+    const plain = new Uint8Array(size).map((_, i) => i % 251);
+    const sealed = encryptFile(plain, recipients);
+    const opened = decryptFile(sealed.body, sealed.fileEncryptedSymmetricKeys['7'], bot.secretKey);
+
+    assert.deepEqual(Array.from(opened), Array.from(plain), `size ${size}`);
+  }
+});
+
+test('a file sealed for someone else does not open', () => {
+  const bot = keypair();
+  const stranger = keypair();
+  const sealed = encryptFile(new Uint8Array([1, 2, 3]), [{ userId: 7, publicKey: bot.publicKey }]);
+
+  assert.throws(() =>
+    decryptFile(sealed.body, sealed.fileEncryptedSymmetricKeys['7'], stranger.secretKey),
+  );
 });
