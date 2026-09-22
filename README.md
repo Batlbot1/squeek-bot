@@ -49,6 +49,11 @@ bot.on('connected' | 'disconnected' | 'error', …)
 
 bot.send(chatId, text, { replyTo? })
 bot.sendFile(chatId, { name, data, mimeType }, caption?)   // channels and discussions
+bot.editMessage(chatId, messageId, text)   // rewrite one of its own
+bot.deleteMessage(messageId)               // for everyone
+bot.react(messageId, emoji)                // toggle its own reaction
+bot.setCommands([{ command, description }])  // the menu people see after "/"
+bot.setDescription(text)                     // the line under its name
 bot.reloadChats()                 // forget cached members; the next send asks again
 
 msg.text        // decrypted
@@ -57,7 +62,36 @@ msg.from        // { id, username, name }
 msg.id
 msg.raw         // the row as the gateway sent it
 msg.reply(text)
+msg.react(emoji)
 ```
+
+## Commands
+
+Tell people what the bot answers to. The list shows on the bot's profile and
+drops down in the composer as soon as someone types `/`:
+
+```js
+bot.on('connected', async () => {
+  await bot.setDescription('Tells you the weather. Ask it with /weather.');
+  await bot.setCommands([
+    { command: 'weather', description: 'Forecast for tomorrow' },
+    { command: 'rain', description: 'Will it rain today' },
+  ]);
+});
+```
+
+A chat with a bot opens with a **Start** button, which sends `/start` — answer
+it with what the bot is for:
+
+```js
+bot.on('message', async (msg) => {
+  if (msg.text === '/start') await msg.reply('Hi! /weather tells you the forecast.');
+});
+```
+
+Declaring commands is the same call the owner makes in the app, so a bot may
+do it for itself; either way the menu is only a menu — what a command *does*
+is this program's business.
 
 ## Posting to a channel without this library
 

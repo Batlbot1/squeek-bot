@@ -69,6 +69,10 @@ export class SqueekApi {
     return this.authed<T>('GET', path);
   }
 
+  patch<T>(path: string, body: unknown): Promise<T> {
+    return this.authed<T>('PATCH', path, body);
+  }
+
   post<T>(path: string, body: unknown): Promise<T> {
     return this.authed<T>('POST', path, body);
   }

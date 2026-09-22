@@ -20,6 +20,9 @@ export const parseToken = (token: string): BotToken => {
 
 export type Chat = { id: number; type: string; name: string | null };
 
+/** One entry of the menu people see when they type "/" in a chat with the bot. */
+export type BotCommand = { command: string; description: string };
+
 /** One message, decrypted, as the bot sees it. */
 export class Message {
   constructor(
@@ -50,6 +53,11 @@ export class Message {
   /** Answers in the same chat, quoting this message. */
   reply(text: string): Promise<void> {
     return this.bot.send(this.chat.id, text, { replyTo: this.id });
+  }
+
+  /** Puts an emoji on this message — «seen it», without a sentence. */
+  react(emoji: string): Promise<void> {
+    return this.bot.react(this.id, emoji);
   }
 }
 
@@ -184,6 +192,68 @@ export class SqueekBot extends EventEmitter {
     form.append('file', new Blob([bytes], { type: file.mimeType }), file.name);
 
     await this.api.upload(form);
+  }
+
+  /**
+   * Rewrites one of the bot's own messages. A channel or discussion is
+   * sealed by the server; elsewhere the new text is sealed here, to the
+   * same members the original went to.
+   */
+  async editMessage(chatId: number, messageId: number, text: string): Promise<void> {
+    const chat = await this.chatOf(chatId);
+
+    if (isServerEncrypted(chat.type)) {
+      await this.sendFrame({
+        type: 'edit_message',
+        token: this.api.accessToken,
+        messageId,
+        content: text,
+      });
+      return;
+    }
+
+    const envelope = encryptMessage(text, await this.recipientsOf(chatId));
+
+    await this.sendFrame({
+      type: 'edit_message',
+      token: this.api.accessToken,
+      messageId,
+      content: envelope.content,
+      encryptedSymmetricKeys: envelope.encryptedSymmetricKeys,
+    });
+  }
+
+  /** Deletes one of the bot's own messages for everyone. */
+  async deleteMessage(messageId: number): Promise<void> {
+    await this.sendFrame({
+      type: 'delete_message',
+      token: this.api.accessToken,
+      messageId,
+    });
+  }
+
+  /** Puts an emoji on a message, or takes the bot's own off again. */
+  async react(messageId: number, emoji: string): Promise<void> {
+    await this.sendFrame({
+      type: 'message_reaction',
+      token: this.api.accessToken,
+      messageId,
+      emoji,
+    });
+  }
+
+  /**
+   * Declares what the bot answers to. People see the list on its profile
+   * and in the composer when they type a slash; what a command does is
+   * still this program's business. Usually called once, after start().
+   */
+  async setCommands(commands: BotCommand[]): Promise<void> {
+    await this.api.patch(`/bots/${this.id}`, { commands });
+  }
+
+  /** The line under the bot's name on its profile. */
+  async setDescription(bio: string): Promise<void> {
+    await this.api.patch(`/bots/${this.id}`, { bio });
   }
 
   /** Forgets what it knows about chats and members; the next send asks again. */
