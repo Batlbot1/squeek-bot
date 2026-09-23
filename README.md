@@ -122,8 +122,8 @@ is this program's business.
 
 ## Posting to a channel without this library
 
-Channels and discussions are encrypted by the server, so a post there is one
-HTTP request in any language:
+A bot that only posts to a channel needs no library: make it a channel admin
+and send two HTTP requests from any language.
 
 ```bash
 TOKENS=$(curl -s https://api.squeek.net/auth/bot -H 'content-type: application/json' \
@@ -135,8 +135,15 @@ curl https://api.squeek.net/messages -H "authorization: Bearer $ACCESS" \
   -d '{"chatId":17,"content":"Reminder: meeting at 19:00"}'
 ```
 
-Private chats and groups are end-to-end encrypted and need the envelope this
-library builds; there is no way around that, and that is the point.
+A poll is the same request with a `poll` field:
+
+```bash
+curl https://api.squeek.net/messages -H "authorization: Bearer $ACCESS" \
+  -H 'content-type: application/json' \
+  -d '{"chatId":17,"content":"When do we meet?","poll":{"question":"When do we meet?","options":["Friday","Saturday"]}}'
+```
+
+Private chats and groups do need this library.
 
 ## Without a socket
 
@@ -159,18 +166,14 @@ app.post('/squeek', express.raw({ type: '*/*' }), async (req, res) => {
 });
 ```
 
-`readWebhook` throws when the signature does not match, so an unsigned request
-never reaches your code. The body of a private chat or group is still the
-ciphertext sealed to the bot — this library opens it with the bot's key, and
-the server never could. Replying still needs `bot.start()` to have signed in;
-call it once when your process boots.
+`readWebhook` checks the signature and decrypts the message. When the
+signature does not match it throws, so a stranger's request never reaches your
+code.
 
 ## Files
 
-`sendFile` works in every chat. A channel or a discussion goes up as it is —
-the server seals those. A private chat or a group is sealed here, the same way
-the app does it: the caption under the message key, the bytes under a file key
-of their own, both sealed to every member.
+`sendFile` works in every chat the bot is in; the library takes care of the
+encryption.
 
 ```js
 const chart = await fs.promises.readFile('cpu.png');
@@ -178,7 +181,7 @@ const chart = await fs.promises.readFile('cpu.png');
 await bot.sendFile(chatId, { name: 'cpu.png', data: chart, mimeType: 'image/png' }, 'Last hour');
 ```
 
-The whole file is held in memory while it is sealed — fine for a chart or a
+The whole file is held in memory while it is sent — fine for a chart or a
 log, not for a film.
 
 ## Buttons
@@ -214,8 +217,8 @@ await bot.scheduled(chatId);   // what is still waiting
 await bot.unschedule(id);      // take it back
 ```
 
-Channels and discussions only: those the server can encrypt, so nothing waits
-on a device that is asleep. The queue is looked at every minute.
+Channels only, including their discussions (the tabs of a channel). The queue
+is looked at every minute.
 
 ## Keeping order
 
