@@ -530,6 +530,12 @@ export class SqueekBot extends EventEmitter {
           return;
         }
 
+        if (data?.type === 'key_changed') {
+          // Someone replaced a lost key; what was cached would seal to the old one.
+          this.recipients.clear();
+          return;
+        }
+
         if (data?.type === 'button_press') {
           this.emit('button', data as ButtonPress);
           return;
