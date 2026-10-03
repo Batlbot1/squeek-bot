@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { SqueekApi } from './api';
 import {
+  decryptFile,
   decryptMessage,
   encryptFile,
   encryptMessage,
@@ -45,6 +46,12 @@ export type BotCommand = { command: string; description: string };
  */
 export type BotButton = { label: string; data: string };
 
+/** A file on a message, as the server describes it; the bytes come from download(). */
+export type Attachment = { id: number; name: string; mimeType: string; size: number };
+
+/** A file for the bot to send. */
+export type OutgoingFile = { name: string; data: Uint8Array | Buffer; mimeType: string };
+
 /** Someone pressed one of the bot's buttons. */
 export type ButtonPress = {
   chatId: number;
@@ -75,6 +82,25 @@ export class Message {
     };
   }
 
+  /** Files on this message: a voice note, a photo, a document. Usually one. */
+  get attachments(): Attachment[] {
+    const rows: any[] = Array.isArray(this.raw.attachments) ? this.raw.attachments : [];
+
+    return rows.map((row) => ({
+      id: Number(row.id),
+      name: String(row.originalName ?? ''),
+      mimeType: String(row.mimeType ?? 'application/octet-stream'),
+      size: Number(row.size ?? 0),
+    }));
+  }
+
+  /** The bytes of one of its files, decrypted. The first file by default. */
+  download(attachment: Attachment | undefined = this.attachments[0]): Promise<Buffer> {
+    if (!attachment) return Promise.reject(new Error('This message has no file'));
+
+    return this.bot.download(attachment);
+  }
+
   /** True when the bot itself wrote it — most bots skip those. */
   get isMine(): boolean {
     return this.from.id === this.bot.id;
@@ -83,6 +109,11 @@ export class Message {
   /** Answers in the same chat, quoting this message; gives the new id. */
   reply(text: string): Promise<number> {
     return this.bot.send(this.chat.id, text, { replyTo: this.id });
+  }
+
+  /** Sends a file into the same chat; gives the new message id. */
+  replyFile(file: OutgoingFile, caption = ''): Promise<number> {
+    return this.bot.sendFile(this.chat.id, file, caption);
   }
 
   /** Puts an emoji on this message — «seen it», without a sentence. */
@@ -102,6 +133,8 @@ const PRODUCTION = {
   apiUrl: 'https://api.squeek.net',
   wsUrl: 'wss://ws.squeek.net/ws',
 };
+
+const idOf = (stored: unknown): number => Number((stored as { id?: unknown } | null)?.id ?? 0);
 
 const isServerEncrypted = (type: string) => type === 'channel' || type === 'discussion';
 
@@ -241,11 +274,7 @@ export class SqueekBot extends EventEmitter {
    * the message key, the bytes under a file key of their own, both sealed
    * to every member.
    */
-  async sendFile(
-    chatId: number,
-    file: { name: string; data: Uint8Array | Buffer; mimeType: string },
-    caption = '',
-  ): Promise<void> {
+  async sendFile(chatId: number, file: OutgoingFile, caption = ''): Promise<number> {
     const chat = await this.chatOf(chatId);
     const bytes = new Uint8Array(file.data.byteLength);
 
@@ -261,8 +290,7 @@ export class SqueekBot extends EventEmitter {
       form.append('fileEncryptedSymmetricKeys', '{}');
       form.append('file', new Blob([bytes], { type: file.mimeType }), file.name);
 
-      await this.api.upload(form);
-      return;
+      return idOf(await this.api.upload(form));
     }
 
     const recipients = await this.recipientsOf(chatId);
@@ -280,13 +308,26 @@ export class SqueekBot extends EventEmitter {
     form.append(
       'file',
       // Copied into a plain ArrayBuffer: a subarray view is not a BlobPart.
-      new Blob([sealedFile.body.slice().buffer as ArrayBuffer], {
-        type: 'application/octet-stream',
-      }),
+      // The type is what the bytes turn out to be once opened; the app
+      // draws a picture or a player from it.
+      new Blob([sealedFile.body.slice().buffer as ArrayBuffer], { type: file.mimeType }),
       file.name,
     );
 
-    await this.api.upload(form);
+    return idOf(await this.api.upload(form));
+  }
+
+  /**
+   * The bytes of a file someone sent, opened with the bot's key. A channel
+   * file comes as it is; the server already opened it.
+   */
+  async download(attachment: Attachment | number): Promise<Buffer> {
+    const id = typeof attachment === 'number' ? attachment : attachment.id;
+    const { body, sealedKey } = await this.api.download(id);
+
+    if (!sealedKey) return Buffer.from(body);
+
+    return Buffer.from(decryptFile(body, sealedKey, this.secretKey));
   }
 
   /**
@@ -325,6 +366,35 @@ export class SqueekBot extends EventEmitter {
       token: this.api.accessToken,
       messageId,
     });
+  }
+
+  /**
+   * "typing…" under the bot's name. The app drops it after a couple of
+   * seconds unless it is said again; keepTyping() says it again for you.
+   */
+  async typing(chatId: number, isTyping = true): Promise<void> {
+    await this.sendFrame({
+      type: 'typing',
+      token: this.api.accessToken,
+      chatId,
+      isTyping,
+    });
+  }
+
+  /**
+   * Shows "typing…" until the returned function is called — for work that
+   * takes a while, like reading a long voice note.
+   */
+  keepTyping(chatId: number): () => void {
+    const say = (on: boolean) => void this.typing(chatId, on).catch(() => undefined);
+    const timer = setInterval(() => say(true), 2000);
+
+    say(true);
+
+    return () => {
+      clearInterval(timer);
+      say(false);
+    };
   }
 
   /** Puts an emoji on a message, or takes the bot's own off again. */

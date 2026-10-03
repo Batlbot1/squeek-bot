@@ -81,3 +81,14 @@ test('a file sealed for someone else does not open', () => {
     decryptFile(sealed.body, sealed.fileEncryptedSymmetricKeys['7'], stranger.secretKey),
   );
 });
+
+test('a message lists its files as the server describes them', async () => {
+  const { Message } = await import('../src/index');
+  const msg = new Message({} as any, {
+    id: 5,
+    attachments: [{ id: 9, originalName: 'voice.m4a', mimeType: 'audio/mp4', size: 1200 }],
+  }, { id: 1, type: 'private', name: null }, '');
+
+  assert.deepEqual(msg.attachments, [{ id: 9, name: 'voice.m4a', mimeType: 'audio/mp4', size: 1200 }]);
+  await assert.rejects(new Message({} as any, { id: 6 }, { id: 1, type: 'private', name: null }, '').download(), /no file/);
+});

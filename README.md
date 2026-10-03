@@ -49,7 +49,10 @@ bot.on('button', (press) => …)    // someone pressed a button of the bot's
 bot.on('connected' | 'disconnected' | 'error', …)
 
 bot.send(chatId, text, { replyTo?, buttons? })   // resolves with the new message id
-bot.sendFile(chatId, { name, data, mimeType }, caption?)   // any chat
+bot.sendFile(chatId, { name, data, mimeType }, caption?)   // any chat; resolves with the id
+bot.download(attachment)                   // a file someone sent, decrypted, as a Buffer
+bot.typing(chatId, isTyping?)              // "typing…" for a moment
+bot.keepTyping(chatId)                     // until the returned function is called
 bot.editMessage(chatId, messageId, text)   // rewrite one of its own
 bot.deleteMessage(messageId)               // for everyone
 bot.react(messageId, emoji)                // toggle its own reaction
@@ -71,7 +74,10 @@ msg.chat        // { id, type, name }
 msg.from        // { id, username, name }
 msg.id
 msg.raw         // the row as the gateway sent it
+msg.attachments   // [{ id, name, mimeType, size }]: a voice note, a photo, a file
+msg.download(attachment?)   // its bytes, decrypted; the first file by default
 msg.reply(text)   // resolves with the new message id
+msg.replyFile({ name, data, mimeType }, caption?)
 msg.react(emoji)
 ```
 
@@ -181,8 +187,28 @@ const chart = await fs.promises.readFile('cpu.png');
 await bot.sendFile(chatId, { name: 'cpu.png', data: chart, mimeType: 'image/png' }, 'Last hour');
 ```
 
-The whole file is held in memory while it is sent — fine for a chart or a
-log, not for a film.
+Files people send come the other way: `msg.attachments` says what is
+there, `msg.download()` gives the bytes, opened with the bot's key.
+
+```js
+bot.on('message', async (msg) => {
+  const [voice] = msg.attachments.filter((a) => a.mimeType.startsWith('audio/'));
+
+  if (!voice || voice.size > 20 * 1024 * 1024) return;
+
+  const stop = bot.keepTyping(msg.chat.id);
+
+  try {
+    const audio = await msg.download(voice);
+    await msg.reply(await transcribe(audio));
+  } finally {
+    stop();
+  }
+});
+```
+
+Either way the whole file is held in memory — fine for a voice note, a
+photo or a chart, not for a film. Check `size` before downloading.
 
 ## Buttons
 

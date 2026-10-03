@@ -96,7 +96,7 @@ export class SqueekApi {
     if (!this.tokens) await this.signIn();
 
     const send = () =>
-      fetch(this.baseUrl + '/attachments', {
+      fetch(this.baseUrl + '/attachments/upload', {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.tokens!.accessToken}`, 'x-client-type': 'bot' },
         body: form,
@@ -112,6 +112,33 @@ export class SqueekApi {
     if (!response.ok) throw new Error(await describe(response));
 
     return response.json();
+  }
+
+  /**
+   * One attachment's bytes. Outside channels they are ciphertext, and the
+   * file key sealed to this bot comes in a header beside them.
+   */
+  async download(attachmentId: number): Promise<{ body: Uint8Array; sealedKey: string | null }> {
+    if (!this.tokens) await this.signIn();
+
+    const fetchIt = () =>
+      fetch(`${this.baseUrl}/attachments/${attachmentId}/download`, {
+        headers: { Authorization: `Bearer ${this.tokens!.accessToken}`, 'x-client-type': 'bot' },
+      });
+
+    let response = await fetchIt();
+
+    if (response.status === 401) {
+      await this.refresh();
+      response = await fetchIt();
+    }
+
+    if (!response.ok) throw new Error(await describe(response));
+
+    return {
+      body: new Uint8Array(await response.arrayBuffer()),
+      sealedKey: response.headers.get('x-encrypted-key'),
+    };
   }
 
   private async authed<T>(method: string, path: string, body?: unknown): Promise<T> {
