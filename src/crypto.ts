@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createDecipheriv, createHmac, timingSafeEqual } from 'node:crypto';
 /**
  * The envelope, exactly as the Squeek app builds and opens it
  * (rattus-messenger, lib/crypto/envelope.ts). Keep the two in step: a bot
@@ -207,23 +207,29 @@ export const encryptFile = (data: Uint8Array, recipients: Recipient[]): Encrypte
   return { body, fileEncryptedSymmetricKeys };
 };
 
-/** Opens a file sealed by encryptFile, given the key sealed to this bot. */
-export const decryptFile = (body: Uint8Array, sealedKey: string, secretKeyHex: string): Uint8Array => {
-  const fileKey = openSealed(sealedKey, secretKeyHex);
-  const baseNonce = body.subarray(0, NONCE_BYTES);
-  const sealed = body.subarray(NONCE_BYTES);
-  const sealedChunk = CHUNK_BYTES + 16;
+/**
+ * Version 2 of the file layout, which the app writes since it moved to the
+ * phone's native AES: "SQK" 0x02, a 12-byte nonce, then AES-256-GCM chunks.
+ * Nonces and the chunk binding are as in version 1, with the marker in front
+ * of each chunk's associated data. Version 1 is a bare 24-byte nonce.
+ */
+const V2_MAGIC = Uint8Array.from([0x53, 0x51, 0x4b, 0x02]);
+const V2_NONCE_BYTES = 12;
+const TAG_BYTES = 16;
+
+type ChunkOpener = (index: number, isLast: boolean, chunk: Uint8Array) => Uint8Array;
+
+const openChunksAs = (body: Uint8Array, headerBytes: number, open: ChunkOpener): Uint8Array => {
+  const sealed = body.subarray(headerBytes);
+  const sealedChunk = CHUNK_BYTES + TAG_BYTES;
   const total = Math.max(1, Math.ceil(sealed.length / sealedChunk));
   const parts: Uint8Array[] = [];
 
   for (let index = 0; index < total; index += 1) {
     const start = index * sealedChunk;
     const chunk = sealed.subarray(start, Math.min(start + sealedChunk, sealed.length));
-    const isLast = index === total - 1;
 
-    parts.push(
-      xchacha20poly1305(fileKey, chunkNonce(baseNonce, index), chunkAad(index, isLast)).decrypt(chunk),
-    );
+    parts.push(open(index, index === total - 1, chunk));
   }
 
   const size = parts.reduce((sum, part) => sum + part.length, 0);
@@ -236,4 +242,54 @@ export const decryptFile = (body: Uint8Array, sealedKey: string, secretKeyHex: s
   }
 
   return plain;
+};
+
+const openV1 = (body: Uint8Array, fileKey: Uint8Array) => {
+  const baseNonce = body.subarray(0, NONCE_BYTES);
+
+  return openChunksAs(body, NONCE_BYTES, (index, isLast, chunk) =>
+    xchacha20poly1305(fileKey, chunkNonce(baseNonce, index), chunkAad(index, isLast)).decrypt(chunk),
+  );
+};
+
+const openV2 = (body: Uint8Array, fileKey: Uint8Array) => {
+  const baseNonce = body.subarray(V2_MAGIC.length, V2_MAGIC.length + V2_NONCE_BYTES);
+
+  if (baseNonce.length < V2_NONCE_BYTES || body.length < V2_MAGIC.length + V2_NONCE_BYTES + TAG_BYTES) {
+    throw new Error('File is too short');
+  }
+
+  return openChunksAs(body, V2_MAGIC.length + V2_NONCE_BYTES, (index, isLast, chunk) => {
+    if (chunk.length < TAG_BYTES) throw new Error('File is truncated');
+
+    const decipher = createDecipheriv('aes-256-gcm', fileKey, chunkNonce(baseNonce, index), {
+      authTagLength: TAG_BYTES,
+    });
+
+    decipher.setAAD(concatBytes(V2_MAGIC, chunkAad(index, isLast)));
+    decipher.setAuthTag(chunk.subarray(chunk.length - TAG_BYTES));
+
+    return new Uint8Array(
+      Buffer.concat([decipher.update(chunk.subarray(0, chunk.length - TAG_BYTES)), decipher.final()]),
+    );
+  });
+};
+
+/** Opens a file sealed by the app or by encryptFile, given the key sealed to this bot. */
+export const decryptFile = (body: Uint8Array, sealedKey: string, secretKeyHex: string): Uint8Array => {
+  const fileKey = openSealed(sealedKey, secretKeyHex);
+  const marked = V2_MAGIC.every((byte, i) => body[i] === byte);
+
+  if (!marked) return openV1(body, fileKey);
+
+  try {
+    return openV2(body, fileKey);
+  } catch (error) {
+    // A version 1 nonce starts with the marker once in four billion.
+    try {
+      return openV1(body, fileKey);
+    } catch {
+      throw error;
+    }
+  }
 };
