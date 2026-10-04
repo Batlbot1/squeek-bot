@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { x25519 } from '@noble/curves/ed25519.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-import { createHmac } from 'node:crypto';
+import { createCipheriv, createHmac, randomBytes } from 'node:crypto';
 import {
   decryptMessage,
   encryptMessage,
@@ -70,6 +70,47 @@ test('a sealed file opens again, chunk boundaries included', () => {
 
     assert.deepEqual(Array.from(opened), Array.from(plain), `size ${size}`);
   }
+});
+
+/** A file the way the app writes it since version 2: native AES-GCM. */
+const sealV2 = (plain: Uint8Array, fileKey: Uint8Array) => {
+  const magic = Uint8Array.from([0x53, 0x51, 0x4b, 0x02]);
+  const baseNonce = randomBytes(12);
+  const total = Math.max(1, Math.ceil(plain.length / (256 * 1024)));
+  const parts: Buffer[] = [Buffer.from(magic), baseNonce];
+
+  for (let index = 0; index < total; index += 1) {
+    const nonce = Buffer.from(baseNonce);
+    nonce.writeUInt32BE((nonce.readUInt32BE(8) ^ index) >>> 0, 8);
+    const isLast = index === total - 1;
+    const aad = Buffer.from([...magic, index >>> 24, (index >>> 16) & 0xff, (index >>> 8) & 0xff, index & 0xff, isLast ? 1 : 0]);
+    const cipher = createCipheriv('aes-256-gcm', fileKey, nonce);
+
+    cipher.setAAD(aad);
+    parts.push(cipher.update(plain.subarray(index * 256 * 1024, (index + 1) * 256 * 1024)), cipher.final(), cipher.getAuthTag());
+  }
+
+  return new Uint8Array(Buffer.concat(parts));
+};
+
+test('a version 2 file from the app opens, and a tampered one does not', () => {
+  const bot = keypair();
+  const fileKey = new Uint8Array(randomBytes(32));
+  const sealedKey = sealTo(bot.publicKey, fileKey);
+
+  for (const size of [0, 1, 256 * 1024, 256 * 1024 + 1, 600 * 1024]) {
+    const plain = new Uint8Array(size).map((_, i) => i % 251);
+    const opened = decryptFile(sealV2(plain, fileKey), sealedKey, bot.secretKey);
+
+    assert.deepEqual(Array.from(opened), Array.from(plain), `size ${size}`);
+  }
+
+  const body = sealV2(new Uint8Array(600 * 1024), fileKey);
+
+  body[body.length - 1] ^= 1;
+  assert.throws(() => decryptFile(body, sealedKey, bot.secretKey));
+  // Cut at a chunk boundary: the last chunk left is not marked as the last.
+  assert.throws(() => decryptFile(sealV2(new Uint8Array(600 * 1024), fileKey).subarray(0, 16 + 2 * (256 * 1024 + 16)), sealedKey, bot.secretKey));
 });
 
 test('a file sealed for someone else does not open', () => {
