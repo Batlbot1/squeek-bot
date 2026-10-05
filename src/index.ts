@@ -422,6 +422,14 @@ export class SqueekBot extends EventEmitter {
   }
 
   /**
+   * The card a Squeek bot shows in the app's marketplace. The server takes
+   * it from official bots only and refuses it for any other account.
+   */
+  async setMarketCard(card: Record<string, unknown>): Promise<void> {
+    await this.api.put('/bots/me/market-card', card);
+  }
+
+  /**
    * Points the server at a URL of yours instead of this socket: from then
    * on every message the bot would have received is POSTed there, signed.
    * The signing secret comes back once — keep it to verify deliveries.
