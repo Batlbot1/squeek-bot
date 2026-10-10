@@ -1,6 +1,17 @@
 /** The few REST calls a bot needs, with the token refreshed when it expires. */
 export type Tokens = { accessToken: string; refreshToken: string };
 
+/** Whether a JWT runs out within `ms`; one that cannot be read counts as expiring. */
+export function expiresWithin(token: string, ms: number, now = Date.now()): boolean {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+
+    return typeof payload.exp !== 'number' || payload.exp * 1000 - now < ms;
+  } catch {
+    return true;
+  }
+}
+
 export class SqueekApi {
   private tokens: Tokens | null = null;
 
@@ -22,6 +33,16 @@ export class SqueekApi {
     }, false);
 
     return this.tokens;
+  }
+
+  /**
+   * The access token, refreshed first when it is about to run out. A
+   * socket opened with an expired one is refused and has to start over.
+   */
+  async freshAccessToken(): Promise<string> {
+    if (!this.tokens || expiresWithin(this.tokens.accessToken, 60_000)) await this.refresh();
+
+    return (this.tokens as Tokens).accessToken;
   }
 
   async refresh(): Promise<Tokens> {

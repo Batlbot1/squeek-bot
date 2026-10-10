@@ -566,8 +566,14 @@ export class SqueekBot extends EventEmitter {
 
       this.socket = socket;
 
-      socket.on('open', () => {
-        socket.send(JSON.stringify({ type: 'global_connection', token: this.api.accessToken }));
+      socket.on('open', async () => {
+        // After an hour offline the token is stale; refreshed here rather
+        // than after the gateway refuses it.
+        const token = await this.api.freshAccessToken().catch(() => this.api.accessToken);
+
+        if (socket.readyState !== WebSocket.OPEN) return;
+
+        socket.send(JSON.stringify({ type: 'global_connection', token }));
         this.ping = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping' }));
         }, 30_000);
